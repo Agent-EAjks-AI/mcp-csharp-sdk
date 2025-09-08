@@ -11,11 +11,14 @@ using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
+using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Subscriptions tracks resource URIs to McpServer instances
-Dictionary<string, List<IMcpServer>> subscriptions = new();
+// Use thread-safe data structures since handlers can run in parallel
+// even in the context of a single session.
+ConcurrentDictionary<string, ConcurrentBag<IMcpServer>> subscriptions = new();
 
 builder.Services
     .AddMcpServer()
@@ -32,15 +35,10 @@ builder.Services
     .WithResources<SimpleResourceType>()
     .WithSubscribeToResourcesHandler(async (ctx, ct) =>
     {
-        var uri = ctx.Params?.Uri;
-
-        if (uri is not null)
+        if (ctx.Params?.Uri is { } uri)
         {
-            if (!subscriptions.ContainsKey(uri))
-            {
-                subscriptions[uri] = new List<IMcpServer>();
-            }
-            subscriptions[uri].Add(ctx.Server);
+            var bag = subscriptions.GetOrAdd(uri, _ => new ConcurrentBag<IMcpServer>());
+            bag.Add(ctx.Server);
 
             await ctx.Server.SampleAsync([
                 new ChatMessage(ChatRole.System, "You are a helpful test server"),
@@ -58,13 +56,13 @@ builder.Services
     })
     .WithUnsubscribeFromResourcesHandler(async (ctx, ct) =>
     {
-        var uri = ctx.Params?.Uri;
-        if (uri is not null)
+        if (ctx.Params?.Uri is { } uri)
         {
-            if (subscriptions.ContainsKey(uri))
+            if (subscriptions.TryGetValue(uri, out var bag))
             {
-                // Remove ctx.Server from the subscription list
-                subscriptions[uri].Remove(ctx.Server);
+                // Remove ctx.Server from the subscription bag (ConcurrentBag does not support removal, so recreate)
+                var newBag = new ConcurrentBag<IMcpServer>(bag.Where(s => s != ctx.Server));
+                subscriptions[uri] = newBag;
             }
         }
         return new EmptyResult();
@@ -145,7 +143,7 @@ builder.Services.AddOpenTelemetry()
     .WithLogging(b => b.SetResourceBuilder(resource))
     .UseOtlpExporter();
 
-builder.Services.AddSingleton<IDictionary<string, List<IMcpServer>>>(subscriptions);
+builder.Services.AddSingleton(subscriptions);
 builder.Services.AddHostedService<SubscriptionMessageSender>();
 builder.Services.AddHostedService<LoggingUpdateMessageSender>();
 

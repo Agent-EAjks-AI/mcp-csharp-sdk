@@ -1,7 +1,8 @@
 ﻿using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
-internal class SubscriptionMessageSender(IDictionary<string, List<IMcpServer>> subscriptions) : BackgroundService
+using System.Collections.Concurrent;
+internal class SubscriptionMessageSender(ConcurrentDictionary<string, ConcurrentBag<IMcpServer>> subscriptions) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
