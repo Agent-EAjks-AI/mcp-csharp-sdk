@@ -15,14 +15,24 @@ using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Subscriptions tracks resource URIs to McpServer instances
-// Use thread-safe data structures since handlers can run in parallel
-// even in the context of a single session.
-ConcurrentDictionary<string, ConcurrentBag<IMcpServer>> subscriptions = new();
-
 builder.Services
     .AddMcpServer()
-    .WithHttpTransport()
+    .WithHttpTransport(options =>
+    {
+        // Add a RunSessionHandler to remove all subscriptions for the session when it ends
+        options.RunSessionHandler = async (httpContext, mcpServer, token) =>
+        {
+            try
+            {
+                await mcpServer.RunAsync(token);
+            }
+            finally
+            {
+                // This code runs when the session ends
+                SubscriptionManager.RemoveAllSubscriptions(mcpServer);
+            }
+        };
+    })
     .WithTools<AddTool>()
     .WithTools<AnnotatedMessageTool>()
     .WithTools<EchoTool>()
@@ -35,10 +45,13 @@ builder.Services
     .WithResources<SimpleResourceType>()
     .WithSubscribeToResourcesHandler(async (ctx, ct) =>
     {
+        if (ctx.Server.SessionId == null)
+        {
+            throw new McpException("Cannot add subscription for server with null SessionId");
+        }
         if (ctx.Params?.Uri is { } uri)
         {
-            var bag = subscriptions.GetOrAdd(uri, _ => new ConcurrentBag<IMcpServer>());
-            bag.Add(ctx.Server);
+            SubscriptionManager.AddSubscription(uri, ctx.Server);
 
             await ctx.Server.SampleAsync([
                 new ChatMessage(ChatRole.System, "You are a helpful test server"),
@@ -56,14 +69,13 @@ builder.Services
     })
     .WithUnsubscribeFromResourcesHandler(async (ctx, ct) =>
     {
+        if (ctx.Server.SessionId == null)
+        {
+            throw new McpException("Cannot remove subscription for server with null SessionId");
+        }
         if (ctx.Params?.Uri is { } uri)
         {
-            if (subscriptions.TryGetValue(uri, out var bag))
-            {
-                // Remove ctx.Server from the subscription bag (ConcurrentBag does not support removal, so recreate)
-                var newBag = new ConcurrentBag<IMcpServer>(bag.Where(s => s != ctx.Server));
-                subscriptions[uri] = newBag;
-            }
+            SubscriptionManager.RemoveSubscription(uri, ctx.Server);
         }
         return new EmptyResult();
     })
@@ -143,7 +155,6 @@ builder.Services.AddOpenTelemetry()
     .WithLogging(b => b.SetResourceBuilder(resource))
     .UseOtlpExporter();
 
-builder.Services.AddSingleton(subscriptions);
 builder.Services.AddHostedService<SubscriptionMessageSender>();
 builder.Services.AddHostedService<LoggingUpdateMessageSender>();
 

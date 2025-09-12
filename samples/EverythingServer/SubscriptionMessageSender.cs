@@ -2,7 +2,7 @@
 using ModelContextProtocol.Server;
 
 using System.Collections.Concurrent;
-internal class SubscriptionMessageSender(ConcurrentDictionary<string, ConcurrentBag<IMcpServer>> subscriptions) : BackgroundService
+internal class SubscriptionMessageSender() : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -13,7 +13,7 @@ internal class SubscriptionMessageSender(ConcurrentDictionary<string, Concurrent
         {
             try
             {
-                foreach (var (uri, servers) in subscriptions)
+                foreach (var (uri, servers) in SubscriptionManager.GetSubscriptions())
                 {
                     foreach (var server in servers)
                     {
