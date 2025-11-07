@@ -51,18 +51,18 @@ public abstract partial class McpServer : McpSession, IMcpServer
     /// Requests to sample an LLM via the client using the specified request parameters.
     /// </summary>
     /// <param name="request">The parameters for the sampling request.</param>
-    /// <param name="meta">Optional metadata to include in the request.</param>
+    /// <param name="options">Optional request options including metadata, serialization settings, and progress tracking.</param>
     /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests.</param>
     /// <returns>A task containing the sampling result from the client.</returns>
     /// <exception cref="InvalidOperationException">The client does not support sampling.</exception>
     public ValueTask<CreateMessageResult> SampleAsync(
-        CreateMessageRequestParams request, JsonObject? meta = null, CancellationToken cancellationToken = default)
+        CreateMessageRequestParams request, RequestOptions? options = null, CancellationToken cancellationToken = default)
     {
         ThrowIfSamplingUnsupported();
 
-        if (meta is not null)
+        if (options?.Meta is not null)
         {
-            request.Meta = meta;
+            request.Meta = options.Meta;
         }
 
         return SendRequestAsync(
@@ -223,18 +223,18 @@ public abstract partial class McpServer : McpSession, IMcpServer
     /// Requests the client to list the roots it exposes.
     /// </summary>
     /// <param name="request">The parameters for the list roots request.</param>
-    /// <param name="meta">Optional metadata to include in the request.</param>
+    /// <param name="options">Optional request options including metadata, serialization settings, and progress tracking.</param>
     /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests.</param>
     /// <returns>A task containing the list of roots exposed by the client.</returns>
     /// <exception cref="InvalidOperationException">The client does not support roots.</exception>
     public ValueTask<ListRootsResult> RequestRootsAsync(
-        ListRootsRequestParams request, JsonObject? meta = null, CancellationToken cancellationToken = default)
+        ListRootsRequestParams request, RequestOptions? options = null, CancellationToken cancellationToken = default)
     {
         ThrowIfRootsUnsupported();
 
-        if (meta is not null)
+        if (options?.Meta is not null)
         {
-            request.Meta = meta;
+            request.Meta = options.Meta;
         }
 
         return SendRequestAsync(
@@ -488,7 +488,7 @@ public abstract partial class McpServer : McpSession, IMcpServer
 
         /// <inheritdoc/>
         public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
-            _server.SampleAsync(messages, options, meta: null, cancellationToken);
+            _server.SampleAsync(messages, options, requestOptions: null, cancellationToken);
 
         /// <inheritdoc/>
         async IAsyncEnumerable<ChatResponseUpdate> IChatClient.GetStreamingResponseAsync(
