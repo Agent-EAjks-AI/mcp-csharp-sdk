@@ -51,13 +51,19 @@ public abstract partial class McpServer : McpSession, IMcpServer
     /// Requests to sample an LLM via the client using the specified request parameters.
     /// </summary>
     /// <param name="request">The parameters for the sampling request.</param>
+    /// <param name="meta">Optional metadata to include in the request.</param>
     /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests.</param>
     /// <returns>A task containing the sampling result from the client.</returns>
     /// <exception cref="InvalidOperationException">The client does not support sampling.</exception>
     public ValueTask<CreateMessageResult> SampleAsync(
-        CreateMessageRequestParams request, CancellationToken cancellationToken = default)
+        CreateMessageRequestParams request, JsonObject? meta = null, CancellationToken cancellationToken = default)
     {
         ThrowIfSamplingUnsupported();
+
+        if (meta is not null)
+        {
+            request.Meta = meta;
+        }
 
         return SendRequestAsync(
             RequestMethods.SamplingCreateMessage,
@@ -217,13 +223,19 @@ public abstract partial class McpServer : McpSession, IMcpServer
     /// Requests the client to list the roots it exposes.
     /// </summary>
     /// <param name="request">The parameters for the list roots request.</param>
+    /// <param name="meta">Optional metadata to include in the request.</param>
     /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests.</param>
     /// <returns>A task containing the list of roots exposed by the client.</returns>
     /// <exception cref="InvalidOperationException">The client does not support roots.</exception>
     public ValueTask<ListRootsResult> RequestRootsAsync(
-        ListRootsRequestParams request, CancellationToken cancellationToken = default)
+        ListRootsRequestParams request, JsonObject? meta = null, CancellationToken cancellationToken = default)
     {
         ThrowIfRootsUnsupported();
+
+        if (meta is not null)
+        {
+            request.Meta = meta;
+        }
 
         return SendRequestAsync(
             RequestMethods.RootsList,
