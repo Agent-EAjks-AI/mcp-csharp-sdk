@@ -198,7 +198,7 @@ public sealed class McpClientTool : AIFunction
             ProtocolTool.Name,
             arguments,
             progress,
-            new RequestOptions
+            serializerOptions is null ? null : new RequestOptions
             {
                 JsonSerializerOptions = serializerOptions
             },

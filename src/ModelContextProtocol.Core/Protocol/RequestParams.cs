@@ -23,7 +23,24 @@ public abstract class RequestParams
     /// Implementations must not make assumptions about its contents.
     /// </remarks>
     [JsonPropertyName("_meta")]
-    public JsonObject? Meta { get; set; }
+    public JsonObject? Meta {
+        get;
+        set
+        {
+            // If progressToken is already set in Meta and not present in the new value, preserve it.
+            if (field?["progressToken"] is JsonValue existingProgressToken &&
+                (value is null || !value.ContainsKey("progressToken")))
+            {
+                // Create a copy to avoid modifying the input parameter
+                field = value is null ? [] : new JsonObject(value);
+                field["progressToken"] = existingProgressToken;
+            }
+            else
+            {
+                field = value;
+            }
+        }
+    }
 
     /// <summary>
     /// Gets or sets an opaque token that will be attached to any subsequent progress notifications.

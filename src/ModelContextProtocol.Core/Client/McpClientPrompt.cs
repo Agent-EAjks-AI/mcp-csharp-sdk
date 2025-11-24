@@ -30,12 +30,12 @@ public sealed class McpClientPrompt
     /// <remarks>
     /// <para>
     /// This constructor enables reusing cached prompt definitions across different <see cref="McpClient"/> instances
-    /// without needing to call <see cref="McpClient.ListPromptsAsync"/> on every reconnect. This is particularly useful 
+    /// without needing to call <see cref="McpClient.ListPromptsAsync"/> on every reconnect. This is particularly useful
     /// in scenarios where prompt definitions are stable and network round-trips should be minimized.
     /// </para>
     /// <para>
-    /// The provided <paramref name="prompt"/> must represent a prompt that is actually available on the server 
-    /// associated with the <paramref name="client"/>. Attempting to invoke a prompt that doesn't exist on the 
+    /// The provided <paramref name="prompt"/> must represent a prompt that is actually available on the server
+    /// associated with the <paramref name="client"/>. Attempting to invoke a prompt that doesn't exist on the
     /// server will result in an <see cref="McpException"/>.
     /// </para>
     /// </remarks>
@@ -98,6 +98,6 @@ public sealed class McpClientPrompt
             arguments as IReadOnlyDictionary<string, object?> ??
             arguments?.ToDictionary();
 
-        return await _client.GetPromptAsync(ProtocolPrompt.Name, argDict, new RequestOptions(null, serializerOptions), cancellationToken).ConfigureAwait(false);
+        return await _client.GetPromptAsync(ProtocolPrompt.Name, argDict, new RequestOptions(){Meta = null, JsonSerializerOptions = serializerOptions}, cancellationToken).ConfigureAwait(false);
     }
 }

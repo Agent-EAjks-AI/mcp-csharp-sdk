@@ -25,36 +25,9 @@ public sealed class RequestOptions
     public ProgressToken? ProgressToken { get; set; }
 
     /// <summary>
-    /// Gets a default instance with all properties set to null.
-    /// </summary>
-    public static RequestOptions Default { get; } = new();
-
-    /// <summary>
     /// Initializes a new instance of the <see cref="RequestOptions"/> class.
     /// </summary>
     public RequestOptions()
     {
-    }
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="RequestOptions"/> class with the specified metadata.
-    /// </summary>
-    /// <param name="meta">Optional metadata to include in the request.</param>
-    public RequestOptions(JsonObject? meta)
-    {
-        Meta = meta;
-    }
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="RequestOptions"/> class with the specified options.
-    /// </summary>
-    /// <param name="meta">Optional metadata to include in the request.</param>
-    /// <param name="jsonSerializerOptions">The JSON serializer options to use.</param>
-    /// <param name="progressToken">The progress token for tracking operations.</param>
-    public RequestOptions(JsonObject? meta = null, JsonSerializerOptions? jsonSerializerOptions = null, ProgressToken? progressToken = null)
-    {
-        Meta = meta;
-        JsonSerializerOptions = jsonSerializerOptions;
-        ProgressToken = progressToken;
     }
 }

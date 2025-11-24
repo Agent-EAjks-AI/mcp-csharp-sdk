@@ -62,7 +62,9 @@ public abstract partial class McpServer : McpSession, IMcpServer
 
         if (options?.Meta is not null)
         {
-            request.Meta = options.Meta;
+            request.Meta = request.Meta is not null ?
+                            new JsonObject(request.Meta.Union(options.Meta))
+                            : options.Meta;
         }
 
         return SendRequestAsync(
@@ -234,7 +236,9 @@ public abstract partial class McpServer : McpSession, IMcpServer
 
         if (options?.Meta is not null)
         {
-            request.Meta = options.Meta;
+            request.Meta = request.Meta is not null ?
+                            new JsonObject(request.Meta.Union(options.Meta))
+                            : options.Meta;
         }
 
         return SendRequestAsync(
