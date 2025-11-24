@@ -79,19 +79,19 @@ public abstract partial class McpServer : McpSession, IMcpServer
     /// Requests to sample an LLM via the client using the provided chat messages and options.
     /// </summary>
     /// <param name="messages">The messages to send as part of the request.</param>
-    /// <param name="options">The options to use for the request, including model parameters and constraints.</param>
+    /// <param name="chatOptions">The options to use for the request, including model parameters and constraints.</param>
     /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests. The default is <see cref="CancellationToken.None"/>.</param>
     /// <returns>A task containing the chat response from the model.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="messages"/> is <see langword="null"/>.</exception>
     /// <exception cref="InvalidOperationException">The client does not support sampling.</exception>
     public async Task<ChatResponse> SampleAsync(
-        IEnumerable<ChatMessage> messages, ChatOptions? options = default, CancellationToken cancellationToken = default)
+        IEnumerable<ChatMessage> messages, ChatOptions? chatOptions = default, CancellationToken cancellationToken = default)
     {
         Throw.IfNull(messages);
 
         StringBuilder? systemPrompt = null;
 
-        if (options?.Instructions is { } instructions)
+        if (chatOptions?.Instructions is { } instructions)
         {
             (systemPrompt ??= new()).Append(instructions);
         }
@@ -137,15 +137,15 @@ public abstract partial class McpServer : McpSession, IMcpServer
         }
 
         ModelPreferences? modelPreferences = null;
-        if (options?.ModelId is { } modelId)
+        if (chatOptions?.ModelId is { } modelId)
         {
             modelPreferences = new() { Hints = [new() { Name = modelId }] };
         }
 
         IList<Tool>? tools = null;
-        if (options?.Tools is { Count: > 0 })
+        if (chatOptions?.Tools is { Count: > 0 })
         {
-            foreach (var tool in options.Tools)
+            foreach (var tool in chatOptions.Tools)
             {
                 if (tool is AIFunctionDeclaration af)
                 {
@@ -160,7 +160,7 @@ public abstract partial class McpServer : McpSession, IMcpServer
             }
         }
 
-        ToolChoice? toolChoice = options?.ToolMode switch
+        ToolChoice? toolChoice = chatOptions?.ToolMode switch
         {
             NoneChatToolMode => new() { Mode = ToolChoice.ModeNone },
             AutoChatToolMode => new() { Mode = ToolChoice.ModeAuto },
@@ -168,18 +168,18 @@ public abstract partial class McpServer : McpSession, IMcpServer
             _ => null,
         };
 
-        var result = await SampleAsync(new()
+        var result = await SampleAsync(new CreateMessageRequestParams
         {
-            MaxTokens = options?.MaxOutputTokens ?? ServerOptions.MaxSamplingOutputTokens,
+            MaxTokens = chatOptions?.MaxOutputTokens ?? ServerOptions.MaxSamplingOutputTokens,
             Messages = samplingMessages,
             ModelPreferences = modelPreferences,
-            StopSequences = options?.StopSequences?.ToArray(),
+            StopSequences = chatOptions?.StopSequences?.ToArray(),
             SystemPrompt = systemPrompt?.ToString(),
-            Temperature = options?.Temperature,
+            Temperature = chatOptions?.Temperature,
             ToolChoice = toolChoice,
             Tools = tools,
-            Meta = options?.AdditionalProperties?.ToJsonObject(),
-        }, cancellationToken).ConfigureAwait(false);
+            Meta = chatOptions?.AdditionalProperties?.ToJsonObject(),
+        }, null, cancellationToken).ConfigureAwait(false);
 
         List<AIContent> responseContents = [];
         foreach (var block in result.Content)
@@ -492,7 +492,7 @@ public abstract partial class McpServer : McpSession, IMcpServer
 
         /// <inheritdoc/>
         public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
-            _server.SampleAsync(messages, options: options, cancellationToken: cancellationToken);
+            _server.SampleAsync(messages, chatOptions: options, cancellationToken: cancellationToken);
 
         /// <inheritdoc/>
         async IAsyncEnumerable<ChatResponseUpdate> IChatClient.GetStreamingResponseAsync(
