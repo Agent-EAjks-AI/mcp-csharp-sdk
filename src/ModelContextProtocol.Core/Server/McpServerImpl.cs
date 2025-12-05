@@ -108,15 +108,9 @@ internal sealed partial class McpServerImpl : McpServer
             }
         }
 
-        // Build the message filter pipeline if there are any message filters.
-        Func<JsonRpcMessage, Func<Task>, CancellationToken, Task>? messageInterceptor = null;
-        if (options.Filters.MessageFilters.Count > 0)
-        {
-            messageInterceptor = BuildMessageFilterPipeline(options.Filters.MessageFilters);
-        }
-
         // And initialize the session.
-        _sessionHandler = new McpSessionHandler(isServer: true, _sessionTransport, _endpointName!, _requestHandlers, _notificationHandlers, _logger, messageInterceptor);
+        var incomingMessageFilter = BuildMessageFilterPipeline(options.Filters.MessageFilters);
+        _sessionHandler = new McpSessionHandler(isServer: true, _sessionTransport, _endpointName!, _requestHandlers, _notificationHandlers, incomingMessageFilter, _logger);
     }
 
     /// <inheritdoc/>
@@ -708,58 +702,34 @@ internal sealed partial class McpServerImpl : McpServer
         return current;
     }
 
-    private Func<JsonRpcMessage, Func<Task>, CancellationToken, Task> BuildMessageFilterPipeline(
-        List<McpMessageFilter> filters)
+    private JsonRpcMessageFilter BuildMessageFilterPipeline(List<McpMessageFilter> filters)
     {
-        // Build the handler chain from the filters.
-        // The innermost handler calls the provided 'next' delegate.
-        McpMessageHandler baseHandler = async (context, cancellationToken) =>
+        if (filters.Count == 0)
         {
-            // The next delegate is stored in context.Items by the interceptor.
-            if (context.Items.TryGetValue("__NextHandler__", out var nextObj) && nextObj is Func<Task> next)
-            {
-                await next().ConfigureAwait(false);
-            }
-        };
-
-        // Apply filters in reverse order (last filter added is outermost).
-        McpMessageHandler current = baseHandler;
-        for (int i = filters.Count - 1; i >= 0; i--)
-        {
-            current = filters[i](current);
+            return next => next;
         }
 
-        var finalHandler = current;
-
-        // Return the interceptor function that creates a MessageContext and invokes the pipeline.
-        return async (message, next, cancellationToken) =>
+        return next =>
         {
-            var context = new MessageContext(new DestinationBoundMcpServer(this, message.Context?.RelatedTransport), message);
-
-            // Store the next handler in the context so the base handler can call it.
-            context.Items["__NextHandler__"] = next;
-
-            // Handle service scoping if enabled.
-            if (_servicesScopePerRequest)
+            // Build the handler chain from the filters.
+            // The innermost handler calls the provided 'next' delegate with the message from the context.
+            McpMessageHandler baseHandler = async (context, cancellationToken) =>
             {
-                var scope = Services?.GetService<IServiceScopeFactory>()?.CreateAsyncScope();
-                try
-                {
-                    context.Services = scope?.ServiceProvider ?? Services;
-                    await finalHandler(context, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    if (scope is not null)
-                    {
-                        await scope.Value.DisposeAsync().ConfigureAwait(false);
-                    }
-                }
-            }
-            else
+                await next(context.JsonRpcMessage, cancellationToken).ConfigureAwait(false);
+            };
+
+            var current = baseHandler;
+            for (int i = filters.Count - 1; i >= 0; i--)
             {
-                await finalHandler(context, cancellationToken).ConfigureAwait(false);
+                current = filters[i](current);
             }
+
+            // Return the handler that creates a MessageContext and invokes the pipeline.
+            return async (message, cancellationToken) =>
+            {
+                var context = new MessageContext(new DestinationBoundMcpServer(this, message.Context?.RelatedTransport), message);
+                await current(context, cancellationToken).ConfigureAwait(false);
+            };
         };
     }
 
