@@ -108,8 +108,15 @@ internal sealed partial class McpServerImpl : McpServer
             }
         }
 
+        // Build the message filter pipeline if there are any message filters.
+        Func<JsonRpcMessage, Func<Task>, CancellationToken, Task>? messageInterceptor = null;
+        if (options.Filters.MessageFilters.Count > 0)
+        {
+            messageInterceptor = BuildMessageFilterPipeline(options.Filters.MessageFilters);
+        }
+
         // And initialize the session.
-        _sessionHandler = new McpSessionHandler(isServer: true, _sessionTransport, _endpointName!, _requestHandlers, _notificationHandlers, _logger);
+        _sessionHandler = new McpSessionHandler(isServer: true, _sessionTransport, _endpointName!, _requestHandlers, _notificationHandlers, _logger, messageInterceptor);
     }
 
     /// <inheritdoc/>
@@ -699,6 +706,61 @@ internal sealed partial class McpServerImpl : McpServer
         }
 
         return current;
+    }
+
+    private Func<JsonRpcMessage, Func<Task>, CancellationToken, Task> BuildMessageFilterPipeline(
+        List<McpMessageFilter> filters)
+    {
+        // Build the handler chain from the filters.
+        // The innermost handler calls the provided 'next' delegate.
+        McpMessageHandler baseHandler = async (context, cancellationToken) =>
+        {
+            // The next delegate is stored in context.Items by the interceptor.
+            if (context.Items.TryGetValue("__NextHandler__", out var nextObj) && nextObj is Func<Task> next)
+            {
+                await next().ConfigureAwait(false);
+            }
+        };
+
+        // Apply filters in reverse order (last filter added is outermost).
+        McpMessageHandler current = baseHandler;
+        for (int i = filters.Count - 1; i >= 0; i--)
+        {
+            current = filters[i](current);
+        }
+
+        var finalHandler = current;
+
+        // Return the interceptor function that creates a MessageContext and invokes the pipeline.
+        return async (message, next, cancellationToken) =>
+        {
+            var context = new MessageContext(new DestinationBoundMcpServer(this, message.Context?.RelatedTransport), message);
+
+            // Store the next handler in the context so the base handler can call it.
+            context.Items["__NextHandler__"] = next;
+
+            // Handle service scoping if enabled.
+            if (_servicesScopePerRequest)
+            {
+                var scope = Services?.GetService<IServiceScopeFactory>()?.CreateAsyncScope();
+                try
+                {
+                    context.Services = scope?.ServiceProvider ?? Services;
+                    await finalHandler(context, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (scope is not null)
+                    {
+                        await scope.Value.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+            }
+            else
+            {
+                await finalHandler(context, cancellationToken).ConfigureAwait(false);
+            }
+        };
     }
 
     private void UpdateEndpointNameWithClientInfo()

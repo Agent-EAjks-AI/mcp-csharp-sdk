@@ -12,6 +12,22 @@ namespace ModelContextProtocol.Server;
 public sealed class McpServerFilters
 {
     /// <summary>
+    /// Gets the filters for all incoming JSON-RPC messages.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These filters intercept all incoming JSON-RPC messages before they are processed by the server,
+    /// including requests, notifications, responses, and errors. The filters can perform logging,
+    /// authentication, rate limiting, or other cross-cutting concerns that apply to all message types.
+    /// </para>
+    /// <para>
+    /// Message filters are applied before request-specific filters. If a message filter does not call
+    /// the next handler in the pipeline, the default handlers will not be executed.
+    /// </para>
+    /// </remarks>
+    public List<McpMessageFilter> MessageFilters { get; } = [];
+
+    /// <summary>
     /// Gets the filters for the list-tools handler pipeline.
     /// </summary>
     /// <remarks>
