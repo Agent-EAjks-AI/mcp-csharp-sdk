@@ -31,9 +31,12 @@ internal sealed class StreamableHttpPostTransport(StreamableHttpServerTransport 
     {
         Debug.Assert(_pendingRequest.Id is null);
 
+        message.Context ??= new JsonRpcMessageContext();
+
         if (message is JsonRpcRequest request)
         {
             _pendingRequest = request.Id;
+            message.Context.RelatedTransport = this;
 
             // Invoke the initialize request callback if applicable.
             if (parentTransport.OnInitRequestReceived is { } onInitRequest && request.Method == RequestMethods.Initialize)
@@ -42,9 +45,6 @@ internal sealed class StreamableHttpPostTransport(StreamableHttpServerTransport 
                 await onInitRequest(initializeRequest).ConfigureAwait(false);
             }
         }
-
-        message.Context ??= new JsonRpcMessageContext();
-        message.Context.RelatedTransport = this;
 
         if (parentTransport.FlowExecutionContextFromRequests)
         {
