@@ -4,6 +4,10 @@ This sample demonstrates how to use the new `AddMessageFilter` API to implement 
 
 ## Key Features
 
+- **Capability Negotiation**: Advertises `tasks` capability via `ServerCapabilities.Experimental` so clients know task-augmented tool calls are supported.
+
+- **Tool-Level Task Support**: Uses `AddListToolsFilter` to add `execution.taskSupport = "optional"` to tools, conforming to the MCP spec's tool-level negotiation.
+
 - **Protocol Extension via Message Filter**: Shows how `AddMessageFilter` can intercept and handle entirely custom protocol methods (`tasks/get`, `tasks/result`, `tasks/cancel`, `tasks/list`) without modifying the SDK core.
 
 - **Task-Augmented Tool Execution**: The `LongRunningAnalysis` tool demonstrates how a tool can detect the `task` parameter and return a `CreateTaskResult` immediately while processing continues in the background.
@@ -20,6 +24,62 @@ dotnet run
 The server will start on `http://localhost:5000` (or the configured port).
 
 ## How It Works
+
+### Capability Negotiation (Initialize Response)
+
+The server advertises task support via `ServerCapabilities.Experimental` (since the SDK doesn't have a `Tasks` property yet):
+
+```csharp
+builder.Services.Configure<McpServerOptions>(options =>
+{
+    options.Capabilities ??= new();
+    options.Capabilities.Experimental ??= new Dictionary<string, object>();
+
+    // Advertise tasks capability per MCP 2025-11-25 spec
+    options.Capabilities.Experimental["tasks"] = new JsonObject
+    {
+        ["list"] = new JsonObject(),
+        ["cancel"] = new JsonObject(),
+        ["requests"] = new JsonObject
+        {
+            ["tools"] = new JsonObject
+            {
+                ["call"] = new JsonObject()
+            }
+        }
+    };
+});
+```
+
+This tells clients that:
+- `tasks/list` and `tasks/cancel` are supported
+- `tools/call` requests can be augmented with tasks
+
+### Tool-Level Negotiation (List Tools Response)
+
+Per the spec, tools declare support for tasks via `execution.taskSupport`. We use `AddListToolsFilter` to add this to the response:
+
+```csharp
+.AddListToolsFilter(next => async (context, cancellationToken) =>
+{
+    var result = await next(context, cancellationToken);
+
+    foreach (var tool in result.Tools)
+    {
+        if (taskSupportedTools.Contains(tool.Name))
+        {
+            // Add execution.taskSupport = "optional" per spec
+            tool.Meta ??= new JsonObject();
+            tool.Meta["execution"] = new JsonObject
+            {
+                ["taskSupport"] = "optional"
+            };
+        }
+    }
+
+    return result;
+})
+```
 
 ### Message Filter Pattern
 
@@ -45,7 +105,7 @@ The power of `AddMessageFilter` is shown in [Program.cs](Program.cs):
             return; // Don't call next - we handled it
         }
     }
-    
+
     await next(context, cancellationToken); // Continue to default handlers
 });
 ```
@@ -70,7 +130,7 @@ public async Task<JsonNode> LongRunningAnalysis(
         _ = Task.Run(async () => { /* Background work */ });
         return JsonSerializer.SerializeToNode(new CreateTaskResult { Task = taskInfo })!;
     }
-    
+
     // Synchronous execution
     await Task.Delay(durationSeconds * 1000, cancellationToken);
     return JsonValue.Create($"Analysis complete for: {data}")!;
@@ -111,10 +171,10 @@ public sealed class TasksCapability
 {
     [JsonPropertyName("list")]
     public EmptyObject? List { get; set; }
-    
+
     [JsonPropertyName("cancel")]
     public EmptyObject? Cancel { get; set; }
-    
+
     [JsonPropertyName("requests")]
     public TaskRequestsCapability? Requests { get; set; }
 }

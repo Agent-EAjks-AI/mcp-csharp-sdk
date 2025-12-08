@@ -14,9 +14,55 @@ var builder = WebApplication.CreateBuilder(args);
 // Register TaskManager as a singleton
 builder.Services.AddSingleton<TaskManager>();
 
-builder.Services.AddMcpServer()
+// Tool names that support task-augmented execution
+HashSet<string> taskSupportedTools = ["long_running_analysis"];
+
+builder.Services.AddMcpServer(options =>
+    {
+        options.Capabilities ??= new();
+
+        // Configure task capabilities in ServerCapabilities.Experimental
+        // (SDK doesn't have Tasks property yet, so we use Experimental)
+        options.Capabilities.Experimental ??= new Dictionary<string, object>();
+
+        // Advertise tasks capability per MCP 2025-11-25 spec
+        // capabilities.tasks.requests.tools.call indicates we support task-augmented tool calls
+        options.Capabilities.Experimental["tasks"] = new JsonObject
+        {
+            ["list"] = new JsonObject(),
+            ["cancel"] = new JsonObject(),
+            ["requests"] = new JsonObject
+            {
+                ["tools"] = new JsonObject
+                {
+                    ["call"] = new JsonObject()
+                }
+            }
+        };
+    })
     .WithHttpTransport()
     .WithTools<AnalysisTools>()
+    // Use AddListToolsFilter to add execution.taskSupport to tools
+    .AddListToolsFilter(next => async (context, cancellationToken) =>
+    {
+        var result = await next(context, cancellationToken);
+
+        // Add execution.taskSupport to tools that support tasks
+        foreach (var tool in result.Tools)
+        {
+            if (taskSupportedTools.Contains(tool.Name))
+            {
+                // Add execution.taskSupport = "optional" per spec
+                tool.Meta ??= new JsonObject();
+                tool.Meta["execution"] = new JsonObject
+                {
+                    ["taskSupport"] = "optional"
+                };
+            }
+        }
+
+        return result;
+    })
     // Use AddMessageFilter to intercept all tasks/* methods
     // This demonstrates the power of AddMessageFilter: handling entirely custom
     // protocol extensions without modifying the SDK core
