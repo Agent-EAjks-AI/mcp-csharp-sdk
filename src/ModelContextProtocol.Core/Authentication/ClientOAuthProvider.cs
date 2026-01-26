@@ -46,6 +46,12 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
     private string? _clientSecret;
     private ITokenCache _tokenCache;
     private AuthorizationServerMetadata? _authServerMetadata;
+    private int _scopeStepUpCount;
+
+    /// <summary>
+    /// Maximum number of scope step-up retries before failing.
+    /// </summary>
+    private const int MaxScopeStepUpRetries = 3;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ClientOAuthProvider"/> class using the specified options.
@@ -233,6 +239,16 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
     /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests.</param>
     private async Task<string> GetAccessTokenAsync(HttpResponseMessage response, bool attemptedRefresh, CancellationToken cancellationToken)
     {
+        // Check if this is a scope step-up retry (403 with insufficient_scope)
+        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            _scopeStepUpCount++;
+            if (_scopeStepUpCount > MaxScopeStepUpRetries)
+            {
+                ThrowFailedToHandleUnauthorizedResponse($"Maximum scope step-up retry limit ({MaxScopeStepUpRetries}) exceeded.");
+            }
+        }
+
         // Get available authorization servers from the 401 or 403 response
         var protectedResourceMetadata = await ExtractProtectedResourceMetadata(response, cancellationToken).ConfigureAwait(false);
         var availableAuthorizationServers = protectedResourceMetadata.AuthorizationServers;
@@ -282,7 +298,7 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
             }
         }
 
-        // Assign a client ID if necessary
+        // Skip dynamic registration if we have pre-registered credentials (ClientId + ClientSecret)
         if (string.IsNullOrEmpty(_clientId))
         {
             // Try using a client metadata document before falling back to dynamic client registration
@@ -296,8 +312,96 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
             }
         }
 
-        // Perform the OAuth flow
+        // Check if client_credentials grant type should be used
+        // Use client_credentials when:
+        // 1. The server supports client_credentials grant type
+        // 2. We have a client secret (confidential client)
+        // 3. No AuthorizationRedirectDelegate was explicitly provided (machine-to-machine flow)
+        if (ShouldUseClientCredentialsGrant(authServerMetadata))
+        {
+            return await InitiateClientCredentialsFlowAsync(protectedResourceMetadata, authServerMetadata, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Perform the OAuth authorization code flow
         return await InitiateAuthorizationCodeFlowAsync(protectedResourceMetadata, authServerMetadata, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Determines whether to use the client_credentials grant type.
+    /// </summary>
+    private bool ShouldUseClientCredentialsGrant(AuthorizationServerMetadata authServerMetadata)
+    {
+        // Must have a client secret for client_credentials
+        if (string.IsNullOrEmpty(_clientSecret))
+        {
+            return false;
+        }
+
+        // Server must support client_credentials grant type
+        if (authServerMetadata.GrantTypesSupported?.Contains("client_credentials") != true)
+        {
+            return false;
+        }
+
+        // If an authorization redirect delegate was explicitly configured, use authorization code flow
+        // Default delegate is fine to override with client_credentials
+        if (_authorizationRedirectDelegate != DefaultAuthorizationUrlHandler)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Initiates the OAuth client_credentials flow for machine-to-machine authentication.
+    /// </summary>
+    private async Task<string> InitiateClientCredentialsFlowAsync(
+        ProtectedResourceMetadata protectedResourceMetadata,
+        AuthorizationServerMetadata authServerMetadata,
+        CancellationToken cancellationToken)
+    {
+        var resourceUri = GetRequiredResourceUri(protectedResourceMetadata);
+
+        var formParams = new Dictionary<string, string>
+        {
+            ["grant_type"] = "client_credentials",
+            ["resource"] = resourceUri.ToString(),
+        };
+
+        var scope = GetScopeParameter(protectedResourceMetadata);
+        if (!string.IsNullOrEmpty(scope))
+        {
+            formParams["scope"] = scope!;
+        }
+
+        // Add client credentials based on token endpoint auth method
+        var tokenEndpointAuthMethod = GetTokenEndpointAuthMethod(authServerMetadata);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, authServerMetadata.TokenEndpoint);
+
+        if (tokenEndpointAuthMethod == "client_secret_basic")
+        {
+            // Use HTTP Basic authentication
+            var credentials = $"{Uri.EscapeDataString(GetClientIdOrThrow())}:{Uri.EscapeDataString(_clientSecret ?? string.Empty)}";
+            var encodedCredentials = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encodedCredentials);
+        }
+        else
+        {
+            // Use client_secret_post (credentials in body)
+            formParams["client_id"] = GetClientIdOrThrow();
+            formParams["client_secret"] = _clientSecret ?? string.Empty;
+        }
+
+        request.Content = new FormUrlEncodedContent(formParams);
+
+        using var httpResponse = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        httpResponse.EnsureSuccessStatusCode();
+
+        var tokens = await HandleSuccessfulTokenResponseAsync(httpResponse, cancellationToken).ConfigureAwait(false);
+        LogOAuthClientCredentialsCompleted();
+        return tokens.AccessToken;
     }
 
     private void ApplyClientIdMetadataDocument(Uri metadataUri)
@@ -385,19 +489,33 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
 
     private async Task<string?> RefreshTokensAsync(string refreshToken, Uri resourceUri, AuthorizationServerMetadata authServerMetadata, CancellationToken cancellationToken)
     {
-        var requestContent = new FormUrlEncodedContent(new Dictionary<string, string>
+        var formParams = new Dictionary<string, string>
         {
             ["grant_type"] = "refresh_token",
             ["refresh_token"] = refreshToken,
-            ["client_id"] = GetClientIdOrThrow(),
-            ["client_secret"] = _clientSecret ?? string.Empty,
             ["resource"] = resourceUri.ToString(),
-        });
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, authServerMetadata.TokenEndpoint)
-        {
-            Content = requestContent
         };
+
+        // Add client credentials based on token endpoint auth method
+        var tokenEndpointAuthMethod = GetTokenEndpointAuthMethod(authServerMetadata);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, authServerMetadata.TokenEndpoint);
+
+        if (tokenEndpointAuthMethod == "client_secret_basic")
+        {
+            // Use HTTP Basic authentication
+            var credentials = $"{Uri.EscapeDataString(GetClientIdOrThrow())}:{Uri.EscapeDataString(_clientSecret ?? string.Empty)}";
+            var encodedCredentials = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encodedCredentials);
+        }
+        else
+        {
+            // Use client_secret_post (credentials in body)
+            formParams["client_id"] = GetClientIdOrThrow();
+            formParams["client_secret"] = _clientSecret ?? string.Empty;
+        }
+
+        request.Content = new FormUrlEncodedContent(formParams);
 
         using var httpResponse = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
@@ -482,21 +600,35 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
     {
         var resourceUri = GetRequiredResourceUri(protectedResourceMetadata);
 
-        var requestContent = new FormUrlEncodedContent(new Dictionary<string, string>
+        var formParams = new Dictionary<string, string>
         {
             ["grant_type"] = "authorization_code",
             ["code"] = authorizationCode,
             ["redirect_uri"] = _redirectUri.ToString(),
-            ["client_id"] = GetClientIdOrThrow(),
             ["code_verifier"] = codeVerifier,
-            ["client_secret"] = _clientSecret ?? string.Empty,
             ["resource"] = resourceUri.ToString(),
-        });
-
-        using var request = new HttpRequestMessage(HttpMethod.Post, authServerMetadata.TokenEndpoint)
-        {
-            Content = requestContent
         };
+
+        // Add client credentials based on token endpoint auth method
+        var tokenEndpointAuthMethod = GetTokenEndpointAuthMethod(authServerMetadata);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, authServerMetadata.TokenEndpoint);
+
+        if (tokenEndpointAuthMethod == "client_secret_basic")
+        {
+            // Use HTTP Basic authentication
+            var credentials = $"{Uri.EscapeDataString(GetClientIdOrThrow())}:{Uri.EscapeDataString(_clientSecret ?? string.Empty)}";
+            var encodedCredentials = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encodedCredentials);
+        }
+        else
+        {
+            // Use client_secret_post (credentials in body)
+            formParams["client_id"] = GetClientIdOrThrow();
+            formParams["client_secret"] = _clientSecret ?? string.Empty;
+        }
+
+        request.Content = new FormUrlEncodedContent(formParams);
 
         using var httpResponse = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         httpResponse.EnsureSuccessStatusCode();
@@ -870,6 +1002,25 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
 
     private string GetClientIdOrThrow() => _clientId ?? throw new InvalidOperationException("Client ID is not available. This may indicate an issue with dynamic client registration.");
 
+    /// <summary>
+    /// Determines the token endpoint authentication method to use based on server metadata.
+    /// </summary>
+    /// <param name="authServerMetadata">The authorization server metadata.</param>
+    /// <returns>The authentication method to use (client_secret_basic or client_secret_post).</returns>
+    private static string GetTokenEndpointAuthMethod(AuthorizationServerMetadata authServerMetadata)
+    {
+        var supportedMethods = authServerMetadata.TokenEndpointAuthMethodsSupported;
+
+        // If client_secret_basic is supported, prefer it
+        if (supportedMethods?.Contains("client_secret_basic") == true)
+        {
+            return "client_secret_basic";
+        }
+
+        // Otherwise use client_secret_post (default per RFC)
+        return "client_secret_post";
+    }
+
     [DoesNotReturn]
     private static void ThrowFailedToHandleUnauthorizedResponse(string message) =>
         throw new McpException($"Failed to handle unauthorized response with 'Bearer' scheme. {message}");
@@ -879,6 +1030,9 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
 
     [LoggerMessage(Level = LogLevel.Information, Message = "OAuth authorization completed successfully")]
     partial void LogOAuthAuthorizationCompleted();
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "OAuth client_credentials flow completed successfully")]
+    partial void LogOAuthClientCredentialsCompleted();
 
     [LoggerMessage(Level = LogLevel.Information, Message = "OAuth token refresh completed successfully")]
     partial void LogOAuthTokenRefreshCompleted();

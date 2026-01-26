@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.ServerSentEvents;
 using System.Text.Json;
@@ -22,6 +23,8 @@ internal sealed partial class SseClientSessionTransport : TransportBase
     private Task? _receiveTask;
     private readonly ILogger _logger;
     private readonly TaskCompletionSource<bool> _connectionEstablished;
+    private string? _lastEventId;
+    private TimeSpan? _retryInterval;
 
     /// <summary>
     /// SSE transport for a single session. Unlike stdio it does not launch a process, but connects to an existing server.
@@ -138,20 +141,115 @@ internal sealed partial class SseClientSessionTransport : TransportBase
 
     private async Task ReceiveMessagesAsync(CancellationToken cancellationToken)
     {
+        int attempt = 0;
+
+        while (attempt < _options.MaxReconnectionAttempts && !cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                // Delay before reconnection attempts (but not the initial connection)
+                if (attempt > 0)
+                {
+                    var delay = _retryInterval ?? _options.DefaultReconnectionInterval;
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
+
+                using var request = new HttpRequestMessage(HttpMethod.Get, _sseEndpoint);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+                StreamableHttpClientSessionTransport.CopyAdditionalHeaders(request.Headers, _options.AdditionalHeaders, sessionId: null, protocolVersion: null);
+
+                // Include Last-Event-ID header for reconnection
+                if (_lastEventId is not null)
+                {
+                    request.Headers.Add("Last-Event-ID", _lastEventId);
+                }
+
+                HttpResponseMessage response;
+                try
+                {
+                    response = await _httpClient.SendAsync(request, message: null, cancellationToken).ConfigureAwait(false);
+                }
+                catch (HttpRequestException)
+                {
+                    // Network error - retry
+                    attempt++;
+                    continue;
+                }
+
+                using (response)
+                {
+                    if (response.StatusCode >= HttpStatusCode.InternalServerError)
+                    {
+                        // Server error - retry
+                        attempt++;
+                        continue;
+                    }
+
+                    response.EnsureSuccessStatusCode();
+
+                    using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+
+                    var disconnected = await ProcessSseStreamAsync(stream, cancellationToken).ConfigureAwait(false);
+
+                    if (disconnected.IsNetworkError)
+                    {
+                        // Network error during streaming - attempt reconnection if we have a Last-Event-ID
+                        if (_lastEventId is not null)
+                        {
+                            attempt++;
+                            continue;
+                        }
+                    }
+
+                    // Stream ended normally
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    // Normal shutdown
+                    LogTransportReadMessagesCancelled(Name);
+                    _connectionEstablished.TrySetCanceled(cancellationToken);
+                    return;
+                }
+                else
+                {
+                    LogTransportReadMessagesFailed(Name, ex);
+                    _connectionEstablished.TrySetException(ex);
+                    throw;
+                }
+            }
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            LogTransportReadMessagesCancelled(Name);
+            _connectionEstablished.TrySetCanceled(cancellationToken);
+        }
+        else
+        {
+            SetDisconnected();
+        }
+    }
+
+    private async Task<(bool IsNetworkError, bool StreamEnded)> ProcessSseStreamAsync(Stream stream, CancellationToken cancellationToken)
+    {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, _sseEndpoint);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-            StreamableHttpClientSessionTransport.CopyAdditionalHeaders(request.Headers, _options.AdditionalHeaders, sessionId: null, protocolVersion: null);
-
-            using var response = await _httpClient.SendAsync(request, message: null, cancellationToken).ConfigureAwait(false);
-
-            response.EnsureSuccessStatusCode();
-
-            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-
             await foreach (SseItem<string> sseEvent in SseParser.Create(stream).EnumerateAsync(cancellationToken).ConfigureAwait(false))
             {
+                // Track event ID and retry interval for resumability
+                if (!string.IsNullOrEmpty(sseEvent.EventId))
+                {
+                    _lastEventId = sseEvent.EventId;
+                }
+                if (sseEvent.ReconnectionInterval.HasValue)
+                {
+                    _retryInterval = sseEvent.ReconnectionInterval.Value;
+                }
+
                 switch (sseEvent.EventType)
                 {
                     case "endpoint":
@@ -163,25 +261,12 @@ internal sealed partial class SseClientSessionTransport : TransportBase
                         break;
                 }
             }
+
+            return (IsNetworkError: false, StreamEnded: true);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or HttpRequestException)
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                // Normal shutdown
-                LogTransportReadMessagesCancelled(Name);
-                _connectionEstablished.TrySetCanceled(cancellationToken);
-            }
-            else
-            {
-                LogTransportReadMessagesFailed(Name, ex);
-                _connectionEstablished.TrySetException(ex);
-                throw;
-            }
-        }
-        finally
-        {
-            SetDisconnected();
+            return (IsNetworkError: true, StreamEnded: false);
         }
     }
 
