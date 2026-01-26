@@ -205,21 +205,18 @@ internal sealed partial class SseClientSessionTransport : TransportBase
                     return;
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    // Normal shutdown
-                    LogTransportReadMessagesCancelled(Name);
-                    _connectionEstablished.TrySetCanceled(cancellationToken);
-                    return;
-                }
-                else
-                {
-                    LogTransportReadMessagesFailed(Name, ex);
-                    _connectionEstablished.TrySetException(ex);
-                    throw;
-                }
+                // Normal shutdown via cancellation
+                LogTransportReadMessagesCancelled(Name);
+                _connectionEstablished.TrySetCanceled(cancellationToken);
+                return;
+            }
+            catch (Exception ex)
+            {
+                LogTransportReadMessagesFailed(Name, ex);
+                _connectionEstablished.TrySetException(ex);
+                throw;
             }
         }
 

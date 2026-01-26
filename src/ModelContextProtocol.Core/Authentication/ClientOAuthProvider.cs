@@ -174,7 +174,15 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
             return true;
         }
 
-        // Only retry 403 Forbidden if it contains an insufficient_scope error as described in Section 10.1.1 of the MCP specification
+        return HasInsufficientScopeError(response);
+    }
+
+    /// <summary>
+    /// Checks if the response contains an insufficient_scope error (403 Forbidden with error=insufficient_scope).
+    /// </summary>
+    private static bool HasInsufficientScopeError(HttpResponseMessage response)
+    {
+        // Only 403 Forbidden responses can have insufficient_scope error
         // https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#runtime-insufficient-scope-errors
         if (response.StatusCode != System.Net.HttpStatusCode.Forbidden)
         {
@@ -240,13 +248,18 @@ internal sealed partial class ClientOAuthProvider : McpHttpClient
     private async Task<string> GetAccessTokenAsync(HttpResponseMessage response, bool attemptedRefresh, CancellationToken cancellationToken)
     {
         // Check if this is a scope step-up retry (403 with insufficient_scope)
-        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        if (HasInsufficientScopeError(response))
         {
             _scopeStepUpCount++;
             if (_scopeStepUpCount > MaxScopeStepUpRetries)
             {
                 ThrowFailedToHandleUnauthorizedResponse($"Maximum scope step-up retry limit ({MaxScopeStepUpRetries}) exceeded.");
             }
+        }
+        else
+        {
+            // Reset the counter for non-scope-step-up requests (e.g., initial auth or token expiry)
+            _scopeStepUpCount = 0;
         }
 
         // Get available authorization servers from the 401 or 403 response
